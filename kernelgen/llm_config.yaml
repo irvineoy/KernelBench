@@ -1,0 +1,37 @@
+# LLM Service Configuration
+# Supports: OpenAI GPT-4o/GPT-4, Claude Opus 4/Sonnet 4.5, and vLLM local models
+
+# Provider selection: openai, claude, or vllm
+provider: claude
+
+# OpenAI Configuration (GPT-4o, GPT-4, etc.)
+openai:
+  api_key: ${OPENAI_API_KEY}  # or set directly
+  base_url: https://api.openai.com/v1
+  model: gpt-4o  # Options: gpt-4o, gpt-4-turbo, gpt-4
+  temperature: 0.7
+  max_tokens: 128_000
+  timeout: 300
+
+# Claude Configuration (Opus 4, Sonnet 4.5)
+claude:
+  api_key: ${ANTHROPIC_API_KEY}  # or set directly
+  base_url: https://api.anthropic.com
+  model: claude-sonnet-4-5-20250929  # Options: claude-opus-4-20250514, claude-sonnet-4-5-20250929
+  temperature: 0.7
+  max_tokens: 128_000
+  timeout: 300
+
+# vLLM Local Model Configuration
+vllm:
+  base_url: http://localhost:8000/v1  # vLLM server endpoint
+  model: meta-llama/Llama-3.1-70B-Instruct  # Model name on vLLM server
+  temperature: 0.7
+  max_tokens: 128_000
+  timeout: 300
+
+# Retry configuration (applies to all providers)
+retry:
+  max_retries: 3
+  retry_delay: 2  # seconds
+  exponential_backoff: true
