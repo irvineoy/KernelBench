@@ -10,6 +10,13 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Tuple
 import traceback
+import logging
+from datetime import datetime
+import json
+import queue
+import threading
+from io import StringIO
+from contextlib import redirect_stdout, redirect_stderr
 
 from generation_prompt import generate_kernel_prompt, extract_hip_kernel, save_hip_kernel
 from llm_service import LLMService
@@ -24,11 +31,55 @@ LEVEL_MULTIPLIERS = {
 }
 
 
+def setup_logging() -> Tuple[logging.Logger, Path]:
+    """
+    Setup logging to both console and timestamped log file.
+
+    Returns:
+        tuple: (logger, log_file_path)
+    """
+    # Create logs directory
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+
+    # Create timestamped log file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"kernelgen_{timestamp}.log"
+
+    # Setup logger
+    logger = logging.getLogger("kernelgen")
+    logger.setLevel(logging.INFO)
+
+    # Remove existing handlers
+    logger.handlers.clear()
+
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # Console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    return logger, log_file
+
+
 class KernelGenerator:
     """Generate HIP kernels using LLM."""
 
-    def __init__(self, llm_service: LLMService):
+    def __init__(self, llm_service: LLMService, logger: logging.Logger):
         self.llm_service = llm_service
+        self.logger = logger
 
     def generate_kernel(self, model_file_path: str) -> Tuple[str, str, str]:
         """
@@ -40,24 +91,24 @@ class KernelGenerator:
         Returns:
             tuple: (model_file_path, kernel_code, explanation)
         """
-        print(f"\n{'='*80}")
-        print(f"Generating kernel for: {model_file_path}")
-        print('='*80)
+        self.logger.info(f"\n{'='*80}")
+        self.logger.info(f"Generating kernel for: {model_file_path}")
+        self.logger.info('='*80)
 
         # Generate prompt
         prompt = generate_kernel_prompt(model_file_path)
 
         # Call LLM (uses config from llm_config.yaml)
-        print("Sending request to LLM...")
+        self.logger.info("Sending request to LLM...")
         response = self.llm_service.simple_chat(prompt=prompt)
 
         # Extract kernel code
-        print("Extracting kernel code...")
+        self.logger.info("Extracting kernel code...")
         kernel_code, explanation = extract_hip_kernel(response)
 
-        print(f"✓ Kernel generated successfully")
+        self.logger.info(f"✓ Kernel generated successfully")
         if explanation:
-            print(f"\nExplanation:\n{explanation}\n")
+            self.logger.info(f"\nExplanation:\n{explanation}\n")
 
         return model_file_path, kernel_code, explanation
 
@@ -101,160 +152,223 @@ def discover_models(levels: List[str] = None) -> Dict[str, List[Path]]:
     return models
 
 
-def generate_kernels_parallel(
-    models: Dict[str, List[Path]],
-    llm_service: LLMService,
-    max_workers: int = 8
-) -> Dict[str, Tuple[str, str]]:
+def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: logging.Logger,
+                     expected_count: threading.Event, stop_event: threading.Event):
     """
-    Generate HIP kernels in parallel.
+    Worker thread that continuously benchmarks kernels from the queue.
+    Starts working as soon as items are available, doesn't wait for all generation to complete.
 
     Args:
-        models: Dictionary of {level: [model_paths]}
-        llm_service: LLM service instance
-        max_workers: Maximum parallel workers
-
-    Returns:
-        dict: {model_name: (kernel_code, explanation)}
+        benchmark_queue: Queue containing (model_name, level) tuples to benchmark
+        results_dict: Shared dictionary to store benchmark results
+        logger: Logger instance
+        expected_count: Event signaling total expected count is set in results_dict['_expected_total']
+        stop_event: Event signaling generation is complete
     """
-    generator = KernelGenerator(llm_service)
-    results = {}
-    errors = {}
+    benchmarked_count = 0
+    expected_total = None
 
-    # Flatten all models into a list of relative paths
-    tasks = []
-    for level, model_files in models.items():
-        for model_file in model_files:
-            rel_path = f"KernelBench/{level}/{model_file.name}"
-            tasks.append(rel_path)
+    while True:
+        try:
+            # Check if we know the expected total
+            if expected_total is None and expected_count.is_set():
+                expected_total = results_dict.get('_expected_total', None)
 
-    print(f"\n{'='*80}")
-    print(f"Starting parallel kernel generation ({len(tasks)} models, {max_workers} workers)")
-    print('='*80)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all tasks
-        future_to_path = {
-            executor.submit(generator.generate_kernel, path): path
-            for path in tasks
-        }
-
-        # Collect results as they complete
-        for future in as_completed(future_to_path):
-            model_path = future_to_path[future]
-            model_name = Path(model_path).stem
-
+            # Try to get item from queue
             try:
-                _, kernel_code, explanation = future.result()
-                results[model_name] = (kernel_code, explanation)
-                print(f"✓ [{len(results)}/{len(tasks)}] Completed: {model_name}")
-            except Exception as e:
-                errors[model_name] = str(e)
-                print(f"✗ [{len(results)+len(errors)}/{len(tasks)}] Failed: {model_name}")
-                print(f"  Error: {e}")
-
-    if errors:
-        print(f"\n⚠ {len(errors)} kernel generations failed:")
-        for name, error in errors.items():
-            print(f"  - {name}: {error}")
-
-    return results
-
-
-def save_kernels(
-    results: Dict[str, Tuple[str, str]],
-    models: Dict[str, List[Path]]
-) -> Dict[str, Path]:
-    """
-    Save generated kernels to appropriate directories.
-
-    Args:
-        results: {model_name: (kernel_code, explanation)}
-        models: {level: [model_paths]}
-
-    Returns:
-        dict: {model_name: saved_hip_path}
-    """
-    project_root = Path(__file__).parent.parent
-    saved_paths = {}
-
-    print(f"\n{'='*80}")
-    print("Saving generated kernels")
-    print('='*80)
-
-    for level, model_files in models.items():
-        output_dir = project_root / "kernelgen" / level
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        for model_file in model_files:
-            model_name = model_file.stem
-
-            if model_name not in results:
+                item = benchmark_queue.get(timeout=0.5)
+            except queue.Empty:
+                # Check if we're done
+                if stop_event.is_set() and benchmark_queue.empty():
+                    if expected_total is None or benchmarked_count >= expected_total:
+                        break
                 continue
 
-            kernel_code, _ = results[model_name]
-            output_path = output_dir / f"{model_name}.hip"
+            if item is None:  # Sentinel value
+                benchmark_queue.task_done()
+                break
 
-            save_hip_kernel(kernel_code, str(output_path))
-            saved_paths[model_name] = output_path
+            model_name, level = item
+            benchmarked_count += 1
 
-    return saved_paths
-
-
-def benchmark_kernels_sequential(
-    models: Dict[str, List[Path]]
-) -> Dict[str, Dict[str, any]]:
-    """
-    Benchmark kernels sequentially (one at a time for accurate timing).
-
-    Args:
-        models: {level: [model_paths]}
-
-    Returns:
-        dict: {model_name: {level, score, status, error}}
-    """
-    results = {}
-
-    print(f"\n{'='*80}")
-    print("Starting sequential benchmarking")
-    print('='*80)
-
-    total_models = sum(len(files) for files in models.values())
-    completed = 0
-
-    for level, model_files in models.items():
-        for model_file in model_files:
-            model_name = model_file.stem
-            completed += 1
-
-            print(f"\n[{completed}/{total_models}] Benchmarking {level}/{model_name}...")
+            progress = f"[{benchmarked_count}/{expected_total}]" if expected_total else f"[{benchmarked_count}/?]"
+            logger.info(f"\n{progress} Benchmarking {level}/{model_name}...")
 
             try:
-                score = bench_kernel(model_name)
-                results[model_name] = {
+                # Capture stdout/stderr from bench_kernel (which uses print())
+                stdout_capture = StringIO()
+                stderr_capture = StringIO()
+
+                with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                    score = bench_kernel(model_name)
+
+                # Log captured output
+                stdout_text = stdout_capture.getvalue()
+                stderr_text = stderr_capture.getvalue()
+
+                if stdout_text:
+                    for line in stdout_text.strip().split('\n'):
+                        logger.info(f"  {line}")
+
+                if stderr_text:
+                    for line in stderr_text.strip().split('\n'):
+                        logger.error(f"  {line}")
+
+                results_dict[model_name] = {
                     "level": level,
                     "score": score,
                     "status": "success",
                     "error": None
                 }
+                logger.info(f"  ✓ Benchmark complete - Score: {score}")
+
             except Exception as e:
                 error_msg = str(e)
-                print(f"✗ Benchmark failed: {error_msg}")
-                results[model_name] = {
+                logger.error(f"  ✗ Benchmark failed: {error_msg}")
+                logger.error(traceback.format_exc())
+                results_dict[model_name] = {
                     "level": level,
                     "score": 0,
                     "status": "failed",
                     "error": error_msg
                 }
 
-    return results
+            benchmark_queue.task_done()
+
+        except Exception as e:
+            logger.error(f"Benchmark worker error: {e}")
+            if 'item' in locals():
+                benchmark_queue.task_done()
+
+    logger.info(f"\nBenchmark worker finished: {benchmarked_count} kernels processed")
 
 
-def print_results_table(results: Dict[str, Dict[str, any]]):
+def pipeline_generate_and_benchmark(
+    models: Dict[str, List[Path]],
+    llm_service: LLMService,
+    logger: logging.Logger,
+    max_workers: int = 8
+) -> Dict[str, Dict[str, any]]:
+    """
+    Pipeline: Generate (parallel) -> Save (immediate) -> Benchmark (queue, sequential).
+    Benchmark worker starts immediately and processes kernels as they arrive.
+
+    Args:
+        models: Dictionary of {level: [model_paths]}
+        llm_service: LLM service instance
+        logger: Logger instance
+        max_workers: Maximum parallel workers for generation
+
+    Returns:
+        dict: {model_name: {level, score, status, error}}
+    """
+    generator = KernelGenerator(llm_service, logger)
+    project_root = Path(__file__).parent.parent
+
+    # Create benchmark queue and results dict
+    benchmark_queue = queue.Queue()
+    benchmark_results = {}
+    expected_count_event = threading.Event()
+    stop_event = threading.Event()
+
+    # Flatten all models into tasks with level info
+    tasks = []
+    model_to_level = {}
+    for level, model_files in models.items():
+        output_dir = project_root / "kernelgen" / level
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        for model_file in model_files:
+            rel_path = f"KernelBench/{level}/{model_file.name}"
+            model_name = model_file.stem
+            tasks.append((rel_path, level, output_dir, model_name))
+            model_to_level[model_name] = level
+
+    total_models = len(tasks)
+    generated_count = 0
+    failed_count = 0
+
+    logger.info(f"\n{'='*80}")
+    logger.info(f"Starting pipeline: Generate -> Save -> Benchmark Queue")
+    logger.info(f"Total models: {total_models}, Generation workers: {max_workers}")
+    logger.info(f"Benchmark worker will start immediately and process as kernels arrive")
+    logger.info('='*80)
+
+    # Set expected total for benchmark worker
+    benchmark_results['_expected_total'] = total_models
+    expected_count_event.set()
+
+    # Start benchmark worker thread (starts immediately, waits for queue items)
+    # NOT daemon - we want it to complete even if main thread is done
+    benchmark_thread = threading.Thread(
+        target=benchmark_worker,
+        args=(benchmark_queue, benchmark_results, logger, expected_count_event, stop_event),
+        daemon=False
+    )
+    benchmark_thread.start()
+    logger.info("✓ Benchmark worker started, waiting for kernels...\n")
+
+    # Generate kernels in parallel, save immediately, queue for benchmark
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_task = {
+            executor.submit(generator.generate_kernel, rel_path): (rel_path, level, output_dir, model_name)
+            for rel_path, level, output_dir, model_name in tasks
+        }
+
+        for future in as_completed(future_to_task):
+            rel_path, level, output_dir, model_name = future_to_task[future]
+
+            try:
+                # Get generated kernel
+                _, kernel_code, explanation = future.result()
+                generated_count += 1
+
+                # Immediately save to disk
+                output_path = output_dir / f"{model_name}.hip"
+                save_hip_kernel(kernel_code, str(output_path))
+
+                logger.info(f"✓ [Gen: {generated_count + failed_count}/{total_models}] Generated & Saved: {model_name}")
+                logger.info(f"  -> {output_path}")
+
+                # Add to benchmark queue (benchmark worker will pick it up immediately)
+                benchmark_queue.put((model_name, level))
+
+            except Exception as e:
+                failed_count += 1
+                error_msg = str(e)
+                logger.error(f"✗ [Gen: {generated_count + failed_count}/{total_models}] Generation failed: {model_name}")
+                logger.error(f"  Error: {error_msg}")
+
+                # Still record the failure in results (won't be benchmarked)
+                benchmark_results[model_name] = {
+                    "level": level,
+                    "score": 0,
+                    "status": "generation_failed",
+                    "error": error_msg
+                }
+
+    # Signal generation is complete and wait for benchmark worker to finish
+    logger.info(f"\n{'='*80}")
+    logger.info(f"Generation complete: {generated_count} succeeded, {failed_count} failed")
+    logger.info(f"Waiting for benchmark queue to finish... (Queue size: {benchmark_queue.qsize()})")
+    logger.info('='*80)
+
+    stop_event.set()  # Signal that generation is done
+    benchmark_thread.join()  # Wait for all benchmarks to complete
+
+    # Clean up metadata
+    benchmark_results.pop('_expected_total', None)
+
+    logger.info(f"\n✓ All benchmarks complete!")
+
+    return benchmark_results
+
+
+def print_results_table(results: Dict[str, Dict[str, any]], logger: logging.Logger):
     """Print formatted results table with scores."""
-    print(f"\n{'='*100}")
-    print("BENCHMARK RESULTS")
-    print('='*100)
+    logger.info(f"\n{'='*100}")
+    logger.info("BENCHMARK RESULTS")
+    logger.info('='*100)
 
     # Group by level
     by_level = {"level1": [], "level2": [], "level3": []}
@@ -264,8 +378,8 @@ def print_results_table(results: Dict[str, Dict[str, any]]):
             by_level[level].append((model_name, result))
 
     # Print header
-    print(f"{'Model':<50} {'Level':<8} {'Score':<10} {'Weighted':<12} {'Status':<10}")
-    print('-'*100)
+    logger.info(f"{'Model':<50} {'Level':<8} {'Score':<10} {'Weighted':<12} {'Status':<10}")
+    logger.info('-'*100)
 
     total_weighted_score = 0
     total_models = 0
@@ -286,26 +400,26 @@ def print_results_table(results: Dict[str, Dict[str, any]]):
             display_name = model_name[:48] + ".." if len(model_name) > 50 else model_name
 
             status_symbol = "✓" if status == "success" else "✗"
-            print(f"{display_name:<50} {level:<8} {score:<10} {weighted:<12} {status_symbol} {status:<10}")
+            logger.info(f"{display_name:<50} {level:<8} {score:<10} {weighted:<12} {status_symbol} {status:<10}")
 
             level_total += weighted
             total_models += 1
 
-        print(f"{'':<50} {level} Total: {level_total} (×{multiplier})")
-        print('-'*100)
+        logger.info(f"{'':<50} {level} Total: {level_total} (×{multiplier})")
+        logger.info('-'*100)
 
         total_weighted_score += level_total
 
     # Final summary
-    print(f"\n{'TOTAL SCORE':<50} {total_models} models   {total_weighted_score}")
-    print('='*100)
+    logger.info(f"\n{'TOTAL SCORE':<50} {total_models} models   {total_weighted_score}")
+    logger.info('='*100)
 
     # Print failures
     failures = [(name, res) for name, res in results.items() if res["status"] == "failed"]
     if failures:
-        print(f"\n⚠ Failed Models ({len(failures)}):")
+        logger.warning(f"\n⚠ Failed Models ({len(failures)}):")
         for name, res in failures:
-            print(f"  - {name}: {res['error']}")
+            logger.warning(f"  - {name}: {res['error']}")
 
 
 def main():
@@ -341,37 +455,110 @@ def main():
     args = parser.parse_args()
 
     try:
+        # Setup logging
+        logger, log_file = setup_logging()
+        logger.info("="*80)
+        logger.info(f"KernelGen - HIP Kernel Generation and Benchmarking")
+        logger.info(f"Log file: {log_file}")
+        logger.info("="*80)
+
         # Discover models
         models = discover_models(args.levels)
         if not models:
-            print("No models found!")
+            logger.error("No models found!")
             return 1
 
         total_models = sum(len(files) for files in models.values())
-        print(f"\nTotal models to process: {total_models}")
+        logger.info(f"\nTotal models to process: {total_models}")
 
-        # Generate kernels (if not skipped)
-        if not args.skip_generation:
+        # Use pipeline mode (generate -> save -> benchmark queue)
+        if not args.skip_generation and not args.skip_benchmark:
             llm_service = LLMService(args.config)
-            results = generate_kernels_parallel(models, llm_service, args.workers)
-
-            # Save kernels
-            saved_paths = save_kernels(results, models)
-            print(f"\n✓ Saved {len(saved_paths)} HIP kernels")
-
-        # Benchmark kernels (if not skipped)
-        if not args.skip_benchmark:
-            benchmark_results = benchmark_kernels_sequential(models)
+            benchmark_results = pipeline_generate_and_benchmark(models, llm_service, logger, args.workers)
 
             # Print results table
-            print_results_table(benchmark_results)
+            print_results_table(benchmark_results, logger)
 
-        print("\n✓ All done!")
+            # Save benchmark results to JSON
+            log_dir = Path(__file__).parent / "logs"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_file = log_dir / f"benchmark_results_{timestamp}.json"
+
+            with open(results_file, 'w') as f:
+                json.dump(benchmark_results, f, indent=2)
+            logger.info(f"\n✓ Benchmark results saved to: {results_file}")
+
+        # Legacy: Generate only
+        elif not args.skip_generation and args.skip_benchmark:
+            logger.warning("Note: Using legacy mode. For pipeline mode, don't use --skip-benchmark")
+            llm_service = LLMService(args.config)
+            generator = KernelGenerator(llm_service, logger)
+            project_root = Path(__file__).parent.parent
+
+            for level, model_files in models.items():
+                output_dir = project_root / "kernelgen" / level
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                for model_file in model_files:
+                    rel_path = f"KernelBench/{level}/{model_file.name}"
+                    model_name = model_file.stem
+                    try:
+                        _, kernel_code, _ = generator.generate_kernel(rel_path)
+                        output_path = output_dir / f"{model_name}.hip"
+                        save_hip_kernel(kernel_code, str(output_path))
+                        logger.info(f"✓ Saved: {output_path}")
+                    except Exception as e:
+                        logger.error(f"✗ Failed {model_name}: {e}")
+
+        # Legacy: Benchmark only
+        elif args.skip_generation and not args.skip_benchmark:
+            logger.warning("Note: Benchmarking existing kernels only")
+            benchmark_results = {}
+            total_models = sum(len(files) for files in models.values())
+            completed = 0
+
+            for level, model_files in models.items():
+                for model_file in model_files:
+                    model_name = model_file.stem
+                    completed += 1
+                    logger.info(f"\n[{completed}/{total_models}] Benchmarking {level}/{model_name}...")
+                    try:
+                        score = bench_kernel(model_name)
+                        benchmark_results[model_name] = {
+                            "level": level,
+                            "score": score,
+                            "status": "success",
+                            "error": None
+                        }
+                        logger.info(f"  Score: {score}")
+                    except Exception as e:
+                        benchmark_results[model_name] = {
+                            "level": level,
+                            "score": 0,
+                            "status": "failed",
+                            "error": str(e)
+                        }
+
+            print_results_table(benchmark_results, logger)
+
+            log_dir = Path(__file__).parent / "logs"
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            results_file = log_dir / f"benchmark_results_{timestamp}.json"
+            with open(results_file, 'w') as f:
+                json.dump(benchmark_results, f, indent=2)
+            logger.info(f"\n✓ Benchmark results saved to: {results_file}")
+
+        logger.info("\n✓ All done!")
+        logger.info(f"Complete log saved to: {log_file}")
         return 0
 
     except Exception as e:
-        print(f"\n✗ Error: {e}", file=sys.stderr)
-        traceback.print_exc()
+        if 'logger' in locals():
+            logger.error(f"\n✗ Error: {e}")
+            logger.error(traceback.format_exc())
+        else:
+            print(f"\n✗ Error: {e}", file=sys.stderr)
+            traceback.print_exc()
         return 1
 
 

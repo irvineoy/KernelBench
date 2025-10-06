@@ -1,0 +1,12 @@
+# Core ML libraries
+torch
+
+# Build tools
+ninja
+
+# LLM service dependencies
+pyyaml
+httpx
+
+# Utilities
+numpy

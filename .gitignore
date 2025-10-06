@@ -13,3 +13,4 @@ cache/*
 
 .venv/
 build_cache/
+logs/
