@@ -55,6 +55,16 @@ int main() {
 }
 ```
 
+For PyTorch extensions, expose the entry point as:
+
+```cpp
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("run", &run_kernel, "Description...");
+}
+```
+
+The benchmarking harness always calls `module.run(...)`, so keep this name consistent even for specialized kernels (batched matmul, matvec, etc.).
+
 ## Core Optimization Principles
 
 ### 1. Thread Configuration
@@ -122,6 +132,8 @@ void kernel(...) { ... }
 - VGPRs per thread (256 max per SIMD)
 - LDS per block (64 KB per CU)
 - Block size (max 1024 threads)
+
+> ⚠️ **Keep launch bounds consistent.** Only apply `__launch_bounds__(threads_per_block, min_blocks_per_sm)` when you launch the kernel with the exact same `threads_per_block`. If the launch uses more threads than promised, the compiler may under-budget registers and the kernel will fail at runtime (e.g., `unspecified launch failure`). When in doubt, omit `__launch_bounds__` or add static assertions to guard against mismatches.
 
 ### 6. Advanced Techniques
 
@@ -191,13 +203,15 @@ for (int s = blockDim.x/2; s > 0; s >>= 1) {
 ## Performance Checklist
 
 - [ ] Block size multiple of 64
+- [ ] Threads per block ≤ 1024 and matches any launch bounds annotations
 - [ ] Coalesced memory access
 - [ ] Vectorized loads where possible
 - [ ] LDS padding to avoid bank conflicts
 - [ ] Minimized thread divergence
 - [ ] Proper bounds checking
 - [ ] Error handling for HIP calls
-- [ ] `__launch_bounds__` if occupancy critical
+- [ ] `__launch_bounds__` only when the launch configuration matches exactly
+- [ ] `hipDeviceSynchronize()` + `hipGetLastError()` after kernel launch
 
 ## Profiling
 

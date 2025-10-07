@@ -4,6 +4,12 @@ Generate optimized HIP kernels for all KernelBench models and benchmark them.
 Supports parallel LLM generation and compilation, sequential testing.
 """
 
+import os
+# Speed up HIP kernel compilation by only targeting MI250X/MI300X
+# Default PyTorch compiles for 11 GPU architectures (120s+ per kernel)
+# This reduces compilation time to ~20-30s per kernel
+os.environ['TORCH_CUDA_ARCH_LIST'] = 'gfx90a;gfx942'
+
 import argparse
 import sys
 from pathlib import Path

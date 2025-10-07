@@ -33,7 +33,7 @@ def generate_kernel_prompt(model_file_path: str) -> str:
 
     # Define example and guide paths
     example_py_path = project_root / "KernelBench" / "level1" / "1_Square_matrix_multiplication_.py"
-    example_hip_path = project_root / "kernelgen" / "level1" / "1_Square_matrix_multiplication_.hip"
+    example_hip_path = project_root / "kernelgen" / "1_Square_matrix_multiplication_example.hip"
     guide_path = project_root / "kernelgen" / "hip_kernel_guide.md"
 
     # Read all necessary files
@@ -126,7 +126,10 @@ Generate a **complete, optimized HIP kernel** that:
   - Shared memory usage (avoid bank conflicts)
   - Proper thread block dimensions (multiples of 64 for wavefront alignment)
   - Loop unrolling where appropriate
-  - `__launch_bounds__` hints for occupancy
+- If you use `__launch_bounds__`, the declared thread count **must exactly match** the actual `blockDim` used in `hipLaunchKernelGGL`; otherwise omit the annotation
+- After every kernel launch, call `hipDeviceSynchronize()` and check `hipGetLastError()` (or use `TORCH_CHECK`) to surface runtime issues promptly
+- Ensure total threads per block ≤ 1024 and update the grid/block logic accordingly
+- Export a wrapper like `run_kernel(...)` via `m.def("run", &run_kernel, ...)`; the benchmarking harness will call `module.run(...)`
 
 ### Output Format:
 

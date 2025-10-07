@@ -134,10 +134,10 @@ For a PyTorch model at `KernelBench/level1/<model_name>.py`, create:
 ```cpp
 #include <torch/extension.h>
 
-at::Tensor matmul_hip(at::Tensor A, at::Tensor B);
+at::Tensor run_kernel(at::Tensor A, at::Tensor B);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("matmul", &matmul_hip, "Square matrix multiplication (HIP)");
+    m.def("run", &run_kernel, "Square matrix multiplication (HIP)");
 }
 ```
 
@@ -151,7 +151,7 @@ __global__ void matmul_kernel(const float* A, const float* B, float* C, int N) {
     // Kernel implementation
 }
 
-at::Tensor matmul_hip(at::Tensor A, at::Tensor B) {
+at::Tensor run_kernel(at::Tensor A, at::Tensor B) {
     // Launch kernel
     hipLaunchKernelGGL(matmul_kernel, ...);
     return C;

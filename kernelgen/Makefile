@@ -78,3 +78,32 @@ clean:
 ACTIVATE_VENV_CMD = exec bash -c "source .venv/bin/activate && exec bash"
 act:
 	$(ACTIVATE_VENV_CMD) 
+
+
+vllm-server:
+	@if ss -ltn | grep ':30001 ' > /dev/null; then \
+		echo "vLLM server is already running on port 30001."; \
+	else \
+		docker run -d \
+			--ipc=host \
+			--network=host \
+			--privileged \
+			--cap-add=SYS_ADMIN \
+			--cap-add=SYS_PTRACE \
+			--device=/dev/kfd \
+			--device=/dev/dri \
+			--device=/dev/mem \
+			--group-add=render \
+			--security-opt=seccomp=unconfined \
+			rocm/vllm-dev:v0.9.0-rocm6.4 \
+			vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
+			--served-model-name llamas_team_local_llm \
+			--api-key dummy \
+			--port 30001 \
+			--enable-auto-tool-choice \
+			--tool-call-parser hermes \
+			--trust-remote-code; \
+		echo "Don't forget to set local_llm_enabled: true in configs/config.yml"; \
+		echo "vLLM server will be running on port 30001, please wait 3 minutes for it to start..."; \
+		echo "You can use docker logs -f container_id to check the server status"; \
+	fi
