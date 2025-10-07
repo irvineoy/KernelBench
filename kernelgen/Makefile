@@ -100,6 +100,7 @@ vllm:
 			vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
 			--served-model-name llamas_team_local_llm \
 			--api-key dummy \
+			--host 0.0.0.0 \
 			--port 30001 \
 			--enable-auto-tool-choice \
 			--tool-call-parser hermes \
