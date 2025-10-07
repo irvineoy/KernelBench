@@ -5,12 +5,13 @@ Runs each benchmark in a separate process to prevent crashes from killing the ma
 """
 
 import argparse
+import json
+import re
 import subprocess
 import sys
-import json
 import tempfile
-from pathlib import Path
 import time
+from pathlib import Path
 
 
 def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
@@ -56,23 +57,23 @@ def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
         if proc.returncode == 0:
             # Parse score from output
             # Look for "Score: X" or "FINAL SCORE: X" pattern
+            score_patterns = [
+                r"FINAL SCORE:\s*([-+]?\d+(?:\.\d+)?)",
+                r"Score:\s*([-+]?\d+(?:\.\d+)?)",
+            ]
+
             for line in proc.stdout.split('\n'):
-                if 'FINAL SCORE:' in line:
-                    try:
-                        score_str = line.split('FINAL SCORE:')[1].strip()
-                        result["score"] = float(score_str)
-                        result["status"] = "success"
-                        break
-                    except:
-                        pass
-                elif 'Score:' in line:
-                    try:
-                        score_str = line.split('Score:')[1].strip()
-                        result["score"] = float(score_str)
-                        result["status"] = "success"
-                        break
-                    except:
-                        pass
+                for pattern in score_patterns:
+                    match = re.search(pattern, line)
+                    if match:
+                        try:
+                            result["score"] = float(match.group(1))
+                            result["status"] = "success"
+                            break
+                        except ValueError:
+                            continue
+                if result["status"] == "success":
+                    break
         else:
             # Check for specific error patterns
             if "Memory access fault" in proc.stderr or "core dumped" in proc.stderr.lower():
