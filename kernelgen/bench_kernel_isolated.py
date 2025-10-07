@@ -146,7 +146,11 @@ def bench_kernel_isolated(model_name: str, timeout: int = 120, verbose: bool = F
 
     # Save detailed results for debugging if failed
     if result["status"] != "success":
-        debug_file = Path(f"debug_{model_name}_{int(time.time())}.json")
+        # Create logs/debug directory if it doesn't exist
+        debug_dir = Path("logs/debug")
+        debug_dir.mkdir(parents=True, exist_ok=True)
+
+        debug_file = debug_dir / f"debug_{model_name}_{int(time.time())}.json"
         with open(debug_file, 'w') as f:
             json.dump(result, f, indent=2)
         if verbose:

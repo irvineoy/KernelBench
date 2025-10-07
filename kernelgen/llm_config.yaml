@@ -4,14 +4,14 @@
 # Provider selection: openai, claude, or vllm
 provider: claude
 
-# OpenAI Configuration (GPT-4o, GPT-4, etc.)
+# OpenAI Configuration (GPT-5)
 openai:
   api_key: ${OPENAI_API_KEY}  # or set directly
   base_url: https://api.openai.com/v1
-  model: gpt-4o  # Options: gpt-4o, gpt-4-turbo, gpt-4
-  temperature: 0.1
-  max_tokens: 128_000
-  timeout: 300
+  model: gpt-5  # Options: gpt-5
+  effort: low  # For GPT-5: low, medium, high
+  max_tokens: 272_000  # For GPT-5 this maps to max_output_tokens, for others it's max_tokens
+  timeout: 1800
 
 # Claude Configuration (Opus 4, Sonnet 4.5)
 claude:
@@ -20,7 +20,7 @@ claude:
   model: claude-sonnet-4-5-20250929  # Options: claude-opus-4-20250514, claude-sonnet-4-5-20250929
   temperature: 0.1
   max_tokens: 64000
-  timeout: 300
+  timeout: 1000
 
 # vLLM Local Model Configuration
 vllm:
