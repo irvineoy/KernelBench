@@ -15,6 +15,6 @@ cache/*
 build_cache/
 logs/
 
-kernelgen/level1/
-kernelgen/level2/
-kernelgen/level3/
+kernelgen/level1*/
+kernelgen/level2*/
+kernelgen/level3*/

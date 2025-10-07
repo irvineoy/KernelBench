@@ -514,7 +514,7 @@ def main():
     parser.add_argument(
         "--workers",
         type=int,
-        default=8,
+        default=4,
         help="Number of parallel workers for generation (default: 8)"
     )
     parser.add_argument(
@@ -538,10 +538,14 @@ def main():
         help="Path to previous benchmark JSON file to continue from (skip successful models)"
     )
     parser.add_argument(
-        "--isolated",
-        action="store_true",
-        help="Run benchmarks in isolated subprocesses to prevent crashes from killing the main process"
+        "--no-isolated",
+        dest="isolated",
+        action="store_false",
+        help="Disable isolated mode and run benchmarks in the main process (not recommended)"
     )
+
+    # Set default value for isolated mode
+    parser.set_defaults(isolated=True)
 
     args = parser.parse_args()
 

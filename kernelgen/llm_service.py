@@ -225,6 +225,7 @@ class VLLMProvider(BaseProvider):
         super().__init__(config)
         self.base_url = config.get("base_url", "http://localhost:8000/v1")
         self.model = config.get("model", "local-model")
+        self.api_key = config.get("api_key", None)  # Optional API key for vLLM
 
     def _chat_impl(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         """Send request to vLLM server (OpenAI-compatible)."""
@@ -233,6 +234,10 @@ class VLLMProvider(BaseProvider):
         headers = {
             "Content-Type": "application/json"
         }
+
+        # Add API key if configured
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
 
         data = {
             "model": kwargs.get("model", self.model),
