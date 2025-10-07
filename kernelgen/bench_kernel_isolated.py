@@ -6,12 +6,14 @@ Runs each benchmark in a separate process to prevent crashes from killing the ma
 
 import argparse
 import json
+import logging
 import re
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Optional
 
 
 def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
@@ -117,7 +119,12 @@ def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
     return result
 
 
-def bench_kernel_isolated(model_name: str, timeout: int = 120, verbose: bool = False) -> float:
+def bench_kernel_isolated(
+    model_name: str,
+    timeout: int = 120,
+    verbose: bool = False,
+    logger: Optional[logging.Logger] = None,
+) -> float:
     """
     Benchmark a kernel with crash isolation.
 
@@ -125,25 +132,37 @@ def bench_kernel_isolated(model_name: str, timeout: int = 120, verbose: bool = F
         model_name: Name of the model to benchmark
         timeout: Maximum time for the benchmark
         verbose: Print detailed output
+        logger: Optional logger for structured logging
 
     Returns:
         float: Score (0 if failed)
     """
+    def log_info(message: str):
+        if logger:
+            logger.info(message)
+        elif verbose:
+            print(message)
+
+    def log_error(message: str):
+        if logger:
+            logger.error(message)
+        elif verbose:
+            print(message)
+
     if verbose:
-        print(f"\n{'='*80}")
-        print(f"Testing: {model_name} (isolated)")
-        print('='*80)
+        log_info(f"\n{'='*80}")
+        log_info(f"Testing: {model_name} (isolated)")
+        log_info('='*80)
 
     # Run benchmark in subprocess
     result = run_benchmark_subprocess(model_name, timeout)
 
-    if verbose:
-        if result["status"] == "success":
-            print(f"  ✓ Score: {result['score']}")
-        else:
-            print(f"  ✗ Failed: {result['error']}")
-            if result["status"] in ["gpu_crash", "segfault", "aborted"]:
-                print(f"    Status: {result['status']} (process isolated - main process safe)")
+    if result["status"] == "success":
+        log_info(f"  ✓ Score: {result['score']}")
+    else:
+        log_error(f"  ✗ Failed: {result['error']}")
+        if result["status"] in ["gpu_crash", "segfault", "aborted"]:
+            log_error(f"    Status: {result['status']} (process isolated - main process safe)")
 
     # Save detailed results for debugging if failed
     if result["status"] != "success":
@@ -154,8 +173,7 @@ def bench_kernel_isolated(model_name: str, timeout: int = 120, verbose: bool = F
         debug_file = debug_dir / f"debug_{model_name}_{int(time.time())}.json"
         with open(debug_file, 'w') as f:
             json.dump(result, f, indent=2)
-        if verbose:
-            print(f"    Debug info saved to: {debug_file}")
+        log_info(f"    Debug info saved to: {debug_file}")
 
     return result["score"]
 
