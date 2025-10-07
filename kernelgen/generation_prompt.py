@@ -111,15 +111,28 @@ Generate a **complete, optimized HIP kernel** that:
 
 1. **Replicates the exact functionality** of the PyTorch model's `forward()` method
 2. **Takes the same inputs** as defined by `get_inputs()` function
-3. **Produces identical outputs** (within numerical precision 1e-2)
-4. **Optimizes for AMD MI300X (gfx942)** using techniques from the optimization guide
-5. **Includes PyTorch bindings** in a single `.hip` file
+3. **Accepts model parameters (weights)** if the model has learnable parameters
+4. **Produces identical outputs** (within numerical precision 1e-2)
+5. **Optimizes for AMD MI300X (gfx942)** using techniques from the optimization guide
+6. **Includes PyTorch bindings** in a single `.hip` file
+
+### Input Signature:
+
+The HIP kernel will receive inputs in this order:
+1. First: All inputs from `get_inputs()` (e.g., input tensors)
+2. Then: All model parameters from `model.parameters()` (if any exist)
+   - For models with `get_init_inputs()`, these are the learnable weights
+   - Example: For Conv2D - input, weight, bias (if bias=True)
+   - Example: For Linear - input, weight, bias (if bias=True)
+   - Example: For matmul - just A, B (no learnable parameters)
 
 ### Requirements:
 
 - Use `#include <hip/hip_runtime.h>` and `#include <torch/extension.h>`
 - Implement kernel(s) using HIP (`__global__` functions)
 - Create a C++ wrapper function that accepts `at::Tensor` arguments
+  - **Function signature**: `run(inputs..., weights...)` where weights are optional
+  - Check if the model has parameters by looking for `get_init_inputs()` in the Python code
 - Add PyTorch bindings using `PYBIND11_MODULE`
 - Optimize for:
   - Coalesced memory access

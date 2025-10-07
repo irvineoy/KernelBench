@@ -87,16 +87,24 @@ class KernelGenerator:
         self.llm_service = llm_service
         self.logger = logger
 
-    def generate_kernel(self, model_file_path: str) -> Tuple[str, str, str]:
+    def generate_kernel(self, model_file_path: str, output_path: Path = None) -> Tuple[str, str, str]:
         """
         Generate HIP kernel for a model.
 
         Args:
             model_file_path: Relative path to model (e.g., "KernelBench/level1/1_Model.py")
+            output_path: Path where HIP file will be saved (used to check if it exists)
 
         Returns:
             tuple: (model_file_path, kernel_code, explanation)
         """
+        # Check if HIP kernel already exists
+        if output_path and output_path.exists():
+            self.logger.info(f"✓ HIP kernel already exists, skipping generation: {output_path.name}")
+            # Read existing kernel
+            kernel_code = output_path.read_text()
+            return model_file_path, kernel_code, "Loaded from existing file"
+
         self.logger.info(f"\n{'='*80}")
         self.logger.info(f"Generating kernel for: {model_file_path}")
         self.logger.info('='*80)
@@ -159,7 +167,8 @@ def discover_models(levels: List[str] = None) -> Dict[str, List[Path]]:
 
 
 def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: logging.Logger,
-                     expected_count: threading.Event, stop_event: threading.Event):
+                     expected_count: threading.Event, stop_event: threading.Event,
+                     results_file: Path = None):
     """
     Worker thread that continuously benchmarks kernels from the queue.
     Starts working as soon as items are available, doesn't wait for all generation to complete.
@@ -170,9 +179,16 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
         logger: Logger instance
         expected_count: Event signaling total expected count is set in results_dict['_expected_total']
         stop_event: Event signaling generation is complete
+        results_file: Path to JSON file for real-time results saving
     """
     benchmarked_count = 0
     expected_total = None
+
+    # Initialize results file
+    if results_file:
+        results_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(results_file, 'w') as f:
+            json.dump({"results": {}, "metadata": {"status": "in_progress"}}, f, indent=2)
 
     while True:
         try:
@@ -239,12 +255,45 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
                     "error": error_msg
                 }
 
+            # Real-time save to JSON file
+            if results_file:
+                try:
+                    # Filter out metadata keys when saving
+                    clean_results = {k: v for k, v in results_dict.items() if not k.startswith('_')}
+                    with open(results_file, 'w') as f:
+                        json.dump({
+                            "results": clean_results,
+                            "metadata": {
+                                "status": "in_progress",
+                                "completed": benchmarked_count,
+                                "total": expected_total or "unknown"
+                            }
+                        }, f, indent=2)
+                except Exception as e:
+                    logger.error(f"Failed to save results to {results_file}: {e}")
+
             benchmark_queue.task_done()
 
         except Exception as e:
             logger.error(f"Benchmark worker error: {e}")
             if 'item' in locals():
                 benchmark_queue.task_done()
+
+    # Final save with completed status
+    if results_file:
+        try:
+            clean_results = {k: v for k, v in results_dict.items() if not k.startswith('_')}
+            with open(results_file, 'w') as f:
+                json.dump({
+                    "results": clean_results,
+                    "metadata": {
+                        "status": "completed",
+                        "completed": benchmarked_count,
+                        "total": expected_total or benchmarked_count
+                    }
+                }, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save final results: {e}")
 
     logger.info(f"\nBenchmark worker finished: {benchmarked_count} kernels processed")
 
@@ -304,36 +353,46 @@ def pipeline_generate_and_benchmark(
     benchmark_results['_expected_total'] = total_models
     expected_count_event.set()
 
+    # Create real-time results file
+    log_dir = Path(__file__).parent / "logs"
+    log_dir.mkdir(exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_file = log_dir / f"benchmark_results_{timestamp}.json"
+
     # Start benchmark worker thread (starts immediately, waits for queue items)
     # NOT daemon - we want it to complete even if main thread is done
     benchmark_thread = threading.Thread(
         target=benchmark_worker,
-        args=(benchmark_queue, benchmark_results, logger, expected_count_event, stop_event),
+        args=(benchmark_queue, benchmark_results, logger, expected_count_event, stop_event, results_file),
         daemon=False
     )
     benchmark_thread.start()
-    logger.info("✓ Benchmark worker started, waiting for kernels...\n")
+    logger.info(f"✓ Benchmark worker started, saving results to: {results_file}\n")
 
     # Generate kernels in parallel, save immediately, queue for benchmark
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_task = {
-            executor.submit(generator.generate_kernel, rel_path): (rel_path, level, output_dir, model_name)
-            for rel_path, level, output_dir, model_name in tasks
-        }
+        # Prepare output paths for each task
+        future_to_task = {}
+        for rel_path, level, output_dir, model_name in tasks:
+            output_path = output_dir / f"{model_name}.hip"
+            future = executor.submit(generator.generate_kernel, rel_path, output_path)
+            future_to_task[future] = (rel_path, level, output_dir, model_name, output_path)
 
         for future in as_completed(future_to_task):
-            rel_path, level, output_dir, model_name = future_to_task[future]
+            rel_path, level, output_dir, model_name, output_path = future_to_task[future]
 
             try:
                 # Get generated kernel
                 _, kernel_code, explanation = future.result()
                 generated_count += 1
 
-                # Immediately save to disk
-                output_path = output_dir / f"{model_name}.hip"
-                save_hip_kernel(kernel_code, str(output_path))
+                # Save to disk if not already saved (when skipped due to existing file)
+                if not output_path.exists():
+                    save_hip_kernel(kernel_code, str(output_path))
+                    logger.info(f"✓ [Gen: {generated_count + failed_count}/{total_models}] Generated & Saved: {model_name}")
+                else:
+                    logger.info(f"✓ [Gen: {generated_count + failed_count}/{total_models}] Using existing: {model_name}")
 
-                logger.info(f"✓ [Gen: {generated_count + failed_count}/{total_models}] Generated & Saved: {model_name}")
                 logger.info(f"  -> {output_path}")
 
                 # Add to benchmark queue (benchmark worker will pick it up immediately)
@@ -485,14 +544,10 @@ def main():
             # Print results table
             print_results_table(benchmark_results, logger)
 
-            # Save benchmark results to JSON
+            # Results already saved in real-time by benchmark worker
+            # The results_file path is created inside pipeline_generate_and_benchmark
             log_dir = Path(__file__).parent / "logs"
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            results_file = log_dir / f"benchmark_results_{timestamp}.json"
-
-            with open(results_file, 'w') as f:
-                json.dump(benchmark_results, f, indent=2)
-            logger.info(f"\n✓ Benchmark results saved to: {results_file}")
+            logger.info(f"\n✓ Benchmark results saved in real-time to: {log_dir}/benchmark_results_*.json")
 
         # Legacy: Generate only
         elif not args.skip_generation and args.skip_benchmark:

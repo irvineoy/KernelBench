@@ -38,12 +38,6 @@ def load_hip_kernel(kernel_dir: Path, model_name: str):
     build_dir = kernel_dir / "build_cache" / target_archs.replace(";", "_")
     build_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Loading HIP kernel from {kernel_dir}...")
-    print(f"  Source file: {hip_file}")
-    print(f"  Build directory: {build_dir}")
-    print(f"  Target architectures: {target_archs}")
-    print(f"  Starting compilation (optimized for gfx90a+gfx942, ~20-30s)...")
-
     start_time = time.time()
 
     # Speed up compilation by only targeting MI250X (gfx90a) and MI300X (gfx942)
@@ -62,7 +56,7 @@ def load_hip_kernel(kernel_dir: Path, model_name: str):
             extra_cuda_cflags=['-O3', '-I/opt/rocm/include', '-fno-gpu-rdc'],
             extra_ldflags=['-L/opt/rocm/lib', "-lamdhip64"],
             build_directory=str(build_dir),
-            verbose=True
+            verbose=False  # Suppress compilation output
         )
     finally:
         # Restore original environment
@@ -77,7 +71,7 @@ def load_hip_kernel(kernel_dir: Path, model_name: str):
             os.environ["PYTORCH_ROCM_ARCH"] = old_rocm_arch_list
 
     elapsed_time = time.time() - start_time
-    print(f"✓ HIP kernel loaded successfully (compilation took {elapsed_time:.1f}s)")
+    print(f"  Compiled in {elapsed_time:.1f}s (gfx90a/gfx942)")
     return kernel
 
 
@@ -107,47 +101,45 @@ def bench_kernel(model_name: str):
             - Correctness pass: 100 points
             - Performance: 100 * speedup (e.g., 2x = 200, 3x = 300)
     """
-    print(f"[DEBUG] bench_kernel called with model_name: {model_name}", flush=True)
     score = 0
 
     # Setup paths
-    print("[DEBUG] Setting up paths...", flush=True)
     project_root = Path(__file__).parent.parent
     model_path = project_root / "KernelBench" / "level1" / f"{model_name}.py"
     kernel_dir = project_root / "kernelgen" / "level1"
 
-    print("=" * 80, flush=True)
-    print(f"Testing: {model_name}", flush=True)
-    print("=" * 80, flush=True)
+    print("=" * 80)
+    print(f"Testing: {model_name}")
+    print("=" * 80)
 
     # Load Python model
-    print(f"\n[1/5] Loading Python model from {model_path}...", flush=True)
     if not model_path.exists():
         raise FileNotFoundError(f"Python model not found: {model_path}")
 
-    print("[DEBUG] Calling load_python_model...", flush=True)
     py_module = load_python_model(str(model_path))
-    print("  ✓ Python model loaded", flush=True)
 
-    # Get model and inputs
-    print("\n[2/5] Initializing model and inputs...", flush=True)
-    print("[DEBUG] Creating model instance...", flush=True)
-    model = py_module.Model()
-    print("[DEBUG] Setting eval mode...", flush=True)
+    # Initialize model with init_inputs if available
+    if hasattr(py_module, 'get_init_inputs'):
+        init_inputs = py_module.get_init_inputs()
+        model = py_module.Model(*init_inputs)
+    else:
+        model = py_module.Model()
+
     model.eval()
-    print("[DEBUG] Moving model to cuda...", flush=True)
     model = model.cuda()
-    print("[DEBUG] Model on cuda complete", flush=True)
 
     # Get inputs
     inputs = py_module.get_inputs()
     inputs_cuda = [inp.cuda() if isinstance(inp, torch.Tensor) else inp for inp in inputs]
 
-    print(f"  Input shapes: {[inp.shape if isinstance(inp, torch.Tensor) else type(inp) for inp in inputs_cuda]}")
-    print("  ✓ Model and inputs ready")
+    # Extract model parameters (weights) if they exist
+    # These will be passed to HIP kernel for layers like Conv, Linear, etc.
+    model_params = []
+    for param in model.parameters():
+        model_params.append(param.data)
 
     # Load HIP kernel
-    print("\n[3/5] Compiling HIP kernel...")
+    print(f"Compiling HIP kernel...")
     try:
         hip_kernel = load_hip_kernel(kernel_dir, model_name)
         if not hasattr(hip_kernel, HIP_ENTRYPOINT):
@@ -158,94 +150,57 @@ def bench_kernel(model_name: str):
             )
         hip_entry = getattr(hip_kernel, HIP_ENTRYPOINT)
         score += 20
-        print(f"  ✓ Compilation successful (+20 points)")
-        print(f"  ✓ Entry point '{HIP_ENTRYPOINT}' located")
     except Exception as e:
-        print(f"  ✗ Compilation failed: {e}")
-        print(f"\nFinal Score: {score}/20")
+        print(f"✗ Compilation failed: {e}")
         return score
 
-    # Run PyTorch model
-    print("\n[4/5] Running correctness check...")
-    print("  Running PyTorch model...")
-    import time
+    # Run correctness check
+    print(f"Running correctness check...")
     torch.cuda.synchronize()
-    start = time.time()
     with torch.no_grad():
         output_torch = model(*inputs_cuda)
     torch.cuda.synchronize()
-    torch_inference_time = time.time() - start
-    print(f"  PyTorch output shape: {output_torch.shape} (took {torch_inference_time:.3f}s)")
 
-    # Run HIP kernel
-    print(f"  Running HIP entry '{HIP_ENTRYPOINT}'...")
+    # Call HIP kernel with inputs + model parameters
+    # HIP kernel should accept: (*inputs, *model_params)
     torch.cuda.synchronize()
-    start = time.time()
-    output_hip = hip_entry(*inputs_cuda)
+    hip_inputs = inputs_cuda + model_params
+    output_hip = hip_entry(*hip_inputs)
     torch.cuda.synchronize()
-    hip_inference_time = time.time() - start
-    print(f"  HIP output shape: {output_hip.shape} (took {hip_inference_time:.3f}s)")
 
     # Correctness check
-    print("\n  Comparing outputs...")
     diff = torch.abs(output_hip - output_torch)
     max_diff = torch.max(diff).item()
     mean_diff = torch.mean(diff).item()
-    relative_diff = torch.max(diff / (torch.abs(output_torch) + 1e-8)).item()
-
-    print(f"    Max absolute difference: {max_diff:.6e}")
-    print(f"    Mean absolute difference: {mean_diff:.6e}")
-    print(f"    Max relative difference: {relative_diff:.6e}")
 
     threshold = 1e-2
     if max_diff < threshold:
-        print(f"    ✓ PASSED (threshold: {threshold})")
+        print(f"  ✓ Correctness PASSED (max_diff: {max_diff:.2e})")
         correctness_passed = True
         score += 100
-        print(f"    Correctness score: +100 points")
     else:
-        print(f"    ✗ FAILED (threshold: {threshold})")
+        print(f"  ✗ Correctness FAILED (max_diff: {max_diff:.2e}, threshold: {threshold})")
         correctness_passed = False
-        print(f"    Correctness score: +0 points")
 
     # Performance benchmark (only if correctness passed)
     if correctness_passed:
-        print("\n[5/5] Running performance benchmark...")
-        print("  Warming up (5 iterations)...")
-
+        print(f"Running performance benchmark...")
         torch_time = benchmark(lambda: model(*inputs_cuda), warmup=5, iterations=20)
-        print(f"  PyTorch benchmark complete")
-
-        hip_time = benchmark(lambda: hip_entry(*inputs_cuda), warmup=5, iterations=20)
-        print(f"  HIP kernel benchmark complete")
+        hip_time = benchmark(lambda: hip_entry(*hip_inputs), warmup=5, iterations=20)
 
         speedup = torch_time / hip_time
         performance_score = int(100 * speedup)
-
-        print(f"\n  PyTorch time: {torch_time * 1000:.3f} ms")
-        print(f"  HIP kernel time: {hip_time * 1000:.3f} ms")
-        print(f"  Speedup: {speedup:.2f}x")
-        print(f"  Performance score: +{performance_score} points")
-
         score += performance_score
 
-        if hip_time < torch_time:
-            print(f"  ✓ HIP kernel is {speedup:.2f}x faster")
-        else:
-            print(f"  ⚠ HIP kernel is {1/speedup:.2f}x slower")
+        print(f"  PyTorch: {torch_time * 1000:.2f}ms | HIP: {hip_time * 1000:.2f}ms | Speedup: {speedup:.2f}x")
     else:
-        print("\n[5/5] Skipping performance benchmark (correctness test failed)")
-        print("  ⚠ Performance score: +0 points (requires correctness)")
         speedup = 0.0
         performance_score = 0
 
     # Summary
-    print("\n" + "=" * 80)
-    print("Summary:")
-    print(f"  Compilation: ✓ PASSED (+20 points)")
-    print(f"  Correctness: {'✓ PASSED (+100 points)' if correctness_passed else '✗ FAILED (+0 points)'}")
-    print(f"  Performance: {speedup:.2f}x speedup (+{performance_score} points)")
-    print(f"\n  Final Score: {score}")
+    print("-" * 80)
+    status = "✓" if correctness_passed else "✗"
+    print(f"Score: {score} | Compile: 20 | Correct: {100 if correctness_passed else 0} | Perf: {performance_score} {status}")
     print("=" * 80)
 
     return score
