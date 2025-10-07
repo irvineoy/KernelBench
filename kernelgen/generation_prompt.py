@@ -32,9 +32,9 @@ def generate_kernel_prompt(model_file_path: str) -> str:
     model_name = Path(model_file_path).stem
 
     # Define example and guide paths
-    example_py_path = project_root / "KernelBench" / "level1" / "1_Square_matrix_multiplication_.py"
-    example_hip_path = project_root / "kernelgen" / "1_Square_matrix_multiplication_example.hip"
-    guide_path = project_root / "kernelgen" / "hip_kernel_guide.md"
+    example_py_path = project_root / "kernelgen" / "prompts" / "83_conv_depthwise_2D_square_input_asymmetric_kernel.py"
+    example_hip_path = project_root / "kernelgen" / "prompts" / "83_conv_depthwise_2D_square_input_asymmetric_kernel.hip"
+    guide_path = project_root / "kernelgen" / "prompts" / "hip_kernel_guide.md"
 
     # Read all necessary files
     try:
@@ -107,6 +107,8 @@ You are an expert in GPU programming and optimization for AMD GPUs. Your task is
 
 ## 5. Your Task
 
+**⚡ MOST IMPORTANT RULE: The HIP kernel function signature must ONLY contain tensor parameters, NEVER scalar configuration values!**
+
 Generate a **complete, optimized HIP kernel** that:
 
 1. **Replicates the exact functionality** of the PyTorch model's `forward()` method
@@ -116,23 +118,90 @@ Generate a **complete, optimized HIP kernel** that:
 5. **Optimizes for AMD MI300X (gfx942)** using techniques from the optimization guide
 6. **Includes PyTorch bindings** in a single `.hip` file
 
+### CRITICAL: Understanding Parameter Types
+
+**IMPORTANT DISTINCTION:**
+- `get_init_inputs()`: Returns configuration for model CONSTRUCTION (in_channels, kernel_size, stride, padding, etc.)
+  These are NOT passed to the HIP kernel at runtime! They define the architecture.
+- `model.parameters()`: Returns LEARNABLE WEIGHTS (weight tensors, bias tensors)
+  These ARE passed to the HIP kernel at runtime!
+
 ### Input Signature:
 
 The HIP kernel will receive inputs in this order:
 1. First: All inputs from `get_inputs()` (e.g., input tensors)
 2. Then: All model parameters from `model.parameters()` (if any exist)
-   - For models with `get_init_inputs()`, these are the learnable weights
-   - Example: For Conv2D - input, weight, bias (if bias=True)
-   - Example: For Linear - input, weight, bias (if bias=True)
-   - Example: For matmul - just A, B (no learnable parameters)
+   - For Conv2D/ConvTranspose2D: input, weight, [bias]
+   - For Linear: input, weight, [bias]
+   - For activation functions: just input (no learnable parameters)
+   - For matmul: just A, B (no learnable parameters)
+
+**DO NOT** pass configuration parameters (kernel_size, stride, padding, etc.) as arguments!
+Instead, extract configuration from tensor dimensions:
+- Conv2D weight shape: [out_channels, in_channels/groups, kernel_h, kernel_w]
+- Linear weight shape: [out_features, in_features]
+- The configuration is embedded in the weight dimensions!
+
+### Example of CORRECT HIP Kernel Signature:
+
+For a Conv2D model with `get_init_inputs() = [32, 64, (3,5), (2,2), (1,1)]`:
+```cpp
+// CORRECT - Only accepts runtime tensors
+at::Tensor run(at::Tensor input, at::Tensor weight, at::Tensor bias) {{
+    // Extract config from tensor shapes
+    int out_channels = weight.size(0);      // 64
+    int in_channels = weight.size(1);       // 32
+    int kernel_h = weight.size(2);          // 3
+    int kernel_w = weight.size(3);          // 5
+    // Stride, padding are NOT passed - use defaults or extract from output size
+}}
+
+// WRONG - Don't do this!
+at::Tensor run(at::Tensor input, at::Tensor weight, int in_channels,
+               int out_channels, int kernel_h, int kernel_w,
+               int stride_h, int stride_w, int pad_h, int pad_w) {{
+    // This expects configuration as arguments - INCORRECT!
+}}
+```
+
+### ⚠️ CRITICAL RULE FOR CONVOLUTION KERNELS:
+
+For Conv/ConvTranspose models, configuration parameters like stride, padding, dilation, groups are NOT available at runtime! You must either:
+1. **Use default values** based on common patterns (stride=1, padding=0, dilation=1, groups=1)
+2. **Infer from context** when possible (e.g., groups from weight shape relationship)
+3. **Hard-code specific values** if the model name indicates them (e.g., "dilated" → dilation>1)
+
+**NEVER** add stride, padding, dilation, groups, kernel_size, in_channels, out_channels as function parameters!
+The ONLY parameters should be tensors from `get_inputs()` and `model.parameters()`!
+
+### How to Handle Missing Configuration in Conv Kernels:
+
+Since stride/padding/dilation are NOT passed at runtime, here's how to handle them:
+
+```cpp
+at::Tensor run(at::Tensor input, at::Tensor weight) {{
+    // For standard convolution, you can often use defaults:
+    int stride = 1;    // Most common default
+    int padding = 0;   // Valid convolution by default
+    int dilation = 1;  // No dilation by default
+
+    // OR infer groups from weight tensor if needed:
+    // If weight.size(1) != full_in_channels, it's grouped
+    int groups = 1;  // Default to no grouping
+
+    // For specific models, check the model name/comments for hints
+    // e.g., if model name contains "dilated", use dilation > 1
+}}
+```
 
 ### Requirements:
 
 - Use `#include <hip/hip_runtime.h>` and `#include <torch/extension.h>`
 - Implement kernel(s) using HIP (`__global__` functions)
 - Create a C++ wrapper function that accepts `at::Tensor` arguments
-  - **Function signature**: `run(inputs..., weights...)` where weights are optional
-  - Check if the model has parameters by looking for `get_init_inputs()` in the Python code
+  - **Function signature**: `run(inputs_from_get_inputs..., weights_from_model_parameters...)`
+  - Models WITH `get_init_inputs()` have learnable parameters (weight/bias tensors)
+  - Models WITHOUT `get_init_inputs()` have no learnable parameters
 - Add PyTorch bindings using `PYBIND11_MODULE`
 - Optimize for:
   - Coalesced memory access

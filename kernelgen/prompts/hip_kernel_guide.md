@@ -63,7 +63,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 }
 ```
 
-The benchmarking harness always calls `module.run(...)`, so keep this name consistent even for specialized kernels (batched matmul, matvec, etc.).
+The benchmarking harness always calls `module.run(...)`, so keep this name consistent even for specialized kernels (batched matmul, matvec, etc.). If your kernel needs convolution metadata (stride, padding, dilation, output padding, groups, kernel size), declare them as additional scalar arguments named `stride`, `stride_h`, `stride_w`, `pad_h`, `pad_w`, `dilation_h`, `dilation_w`, `output_padding_h`, `output_padding_w`, `kernel_size`, `kernel_h`, `kernel_w`, `groups`, etc. These names match what the harness automatically forwards from the PyTorch module.
 
 ## Core Optimization Principles
 
