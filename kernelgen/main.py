@@ -228,7 +228,7 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
             try:
                 if use_isolated:
                     # Use isolated subprocess benchmarking
-                    score = bench_kernel_isolated(model_name, timeout=120, verbose=True)
+                    score = bench_kernel_isolated(model_name, timeout=120, logger=logger)
                 else:
                     # Use regular in-process benchmarking
                     # Capture stdout/stderr from bench_kernel (which uses print())
@@ -647,7 +647,7 @@ def main():
                     logger.info(f"\n[{completed}/{total_models}] Benchmarking {level}/{model_name}...")
                     try:
                         if args.isolated:
-                            score = bench_kernel_isolated(model_name, timeout=120, verbose=True)
+                            score = bench_kernel_isolated(model_name, timeout=120, logger=logger)
                         else:
                             score = bench_kernel(model_name)
                         benchmark_results[model_name] = {

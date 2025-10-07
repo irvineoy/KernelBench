@@ -55,24 +55,20 @@ def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
 
         if proc.returncode == 0:
             # Parse score from output
-            # Look for "Score: X" or "FINAL SCORE: X" pattern
+            # Look for "Score: X" pattern (may have | after the number)
             for line in proc.stdout.split('\n'):
-                if 'FINAL SCORE:' in line:
+                if 'Score:' in line:
                     try:
-                        score_str = line.split('FINAL SCORE:')[1].strip()
+                        # Extract the score part after "Score:"
+                        score_part = line.split('Score:')[1].strip()
+                        # Take the first part before any "|"
+                        score_str = score_part.split('|')[0].strip()
                         result["score"] = float(score_str)
                         result["status"] = "success"
                         break
-                    except:
-                        pass
-                elif 'Score:' in line:
-                    try:
-                        score_str = line.split('Score:')[1].strip()
-                        result["score"] = float(score_str)
-                        result["status"] = "success"
-                        break
-                    except:
-                        pass
+                    except Exception as e:
+                        # Log parsing error but continue
+                        result["error"] = f"Score parsing error: {str(e)}"
         else:
             # Check for specific error patterns
             if "Memory access fault" in proc.stderr or "core dumped" in proc.stderr.lower():
@@ -116,7 +112,7 @@ def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
     return result
 
 
-def bench_kernel_isolated(model_name: str, timeout: int = 120, verbose: bool = False) -> float:
+def bench_kernel_isolated(model_name: str, timeout: int = 120, verbose: bool = False, logger=None) -> float:
     """
     Benchmark a kernel with crash isolation.
 
@@ -124,33 +120,47 @@ def bench_kernel_isolated(model_name: str, timeout: int = 120, verbose: bool = F
         model_name: Name of the model to benchmark
         timeout: Maximum time for the benchmark
         verbose: Print detailed output
+        logger: Optional logger instance
 
     Returns:
         float: Score (0 if failed)
     """
-    if verbose:
-        print(f"\n{'='*80}")
-        print(f"Testing: {model_name} (isolated)")
-        print('='*80)
-
     # Run benchmark in subprocess
     result = run_benchmark_subprocess(model_name, timeout)
 
-    if verbose:
-        if result["status"] == "success":
-            print(f"  ✓ Score: {result['score']}")
-        else:
-            print(f"  ✗ Failed: {result['error']}")
-            if result["status"] in ["gpu_crash", "segfault", "aborted"]:
-                print(f"    Status: {result['status']} (process isolated - main process safe)")
+    # Use logger if provided, otherwise print if verbose
+    def log_info(msg):
+        if logger:
+            logger.info(msg)
+        elif verbose:
+            print(msg)
 
-    # Save detailed results for debugging if failed
-    if result["status"] != "success":
-        debug_file = Path(f"debug_{model_name}_{int(time.time())}.json")
-        with open(debug_file, 'w') as f:
-            json.dump(result, f, indent=2)
-        if verbose:
-            print(f"    Debug info saved to: {debug_file}")
+    def log_error(msg):
+        if logger:
+            logger.error(msg)
+        elif verbose:
+            print(f"ERROR: {msg}")
+
+    if result["status"] == "success":
+        log_info(f"  ✓ Score: {result['score']}")
+    else:
+        # Only save debug files for actual crashes/errors, not compilation failures
+        if result["status"] in ["gpu_crash", "segfault", "aborted", "timeout"]:
+            debug_file = Path(f"debug_{model_name}_{int(time.time())}.json")
+            with open(debug_file, 'w') as f:
+                json.dump(result, f, indent=2)
+            log_error(f"  ✗ {result['status']}: {result['error']}")
+            log_info(f"    Debug info saved to: {debug_file}")
+        else:
+            # Regular failure (compilation, correctness, etc)
+            log_error(f"  ✗ Failed: {result['error'] if result['error'] else 'See output'}")
+            # Extract key info from stdout
+            if "Correctness FAILED" in result.get("stdout", ""):
+                for line in result["stdout"].split('\n'):
+                    if "Correctness FAILED" in line:
+                        log_info(f"    {line.strip()}")
+            elif "Compilation failed" in result.get("stdout", ""):
+                log_info("    Compilation failed")
 
     return result["score"]
 
@@ -165,10 +175,8 @@ def main():
 
     score = bench_kernel_isolated(args.model, args.timeout, args.verbose)
 
-    # Print result in a parseable format
-    print(f"\nFINAL SCORE: {score}")
-
-    # Exit with appropriate code
+    # Don't print FINAL SCORE here - it's already in the output
+    # Just exit with appropriate code
     sys.exit(0 if score > 0 else 1)
 
 
