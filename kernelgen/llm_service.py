@@ -101,6 +101,7 @@ class BaseProvider:
             # Retry logic
             if attempt < self.max_retries - 1:
                 print(f"Attempt {attempt + 1} failed, retrying in {retry_delay}s...")
+                print(f"  Error: {last_error}")  # Debug: show the actual error
                 time.sleep(retry_delay)
                 if self.exponential_backoff:
                     retry_delay *= 2
@@ -113,19 +114,92 @@ class BaseProvider:
 
 
 class OpenAIProvider(BaseProvider):
-    """OpenAI API provider (GPT-4o, GPT-4, etc.)."""
+    """OpenAI API provider (GPT-5, GPT-4o, GPT-4, etc.)."""
 
     def __init__(self, config: dict):
         super().__init__(config)
         self.api_key = config.get("api_key")
         self.base_url = config.get("base_url", "https://api.openai.com/v1")
-        self.model = config.get("model", "gpt-4o")
+        self.model = config.get("model", "gpt-5")
 
         if not self.api_key:
             raise ValueError("OpenAI API key not configured")
 
     def _chat_impl(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
         """Send request to OpenAI API."""
+        model = kwargs.get("model", self.model)
+
+        # GPT-5 uses different endpoint and parameters
+        if model == "gpt-5":
+            return self._chat_gpt5(messages, **kwargs)
+        else:
+            return self._chat_standard(messages, **kwargs)
+
+    def _chat_gpt5(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
+        """Send request to GPT-5 API using responses.create."""
+        url = f"{self.base_url}/responses"
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        # Convert messages format for GPT-5
+        # GPT-5 expects 'input' instead of 'messages'
+        input_messages = []
+        for msg in messages:
+            input_messages.append({
+                "role": msg.get("role"),
+                "content": msg.get("content")
+            })
+
+        data = {
+            "model": "gpt-5",
+            "input": input_messages,
+            "max_output_tokens": kwargs.get("max_output_tokens", self.config.get("max_tokens", 4096)),
+            "reasoning": {
+                "effort": kwargs.get("effort", self.config.get("effort", "medium"))
+            }
+        }
+
+        timeout = httpx.Timeout(self.timeout)
+
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            result = response.json()
+
+        # Extract content from GPT-5 response format
+        content = ""
+        output_items = result.get("output", [])
+
+        for item in output_items:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+
+            for content_item in item.get("content", []):
+                if (
+                    isinstance(content_item, dict)
+                    and content_item.get("type") == "output_text"
+                ):
+                    content += content_item.get("text", "")
+
+        if not content:
+            # Some beta responses may expose a flattened text field
+            content = result.get("output_text", "") or result.get("response", "")
+
+        if not content:
+            raise RuntimeError("GPT-5 response did not include any output text")
+
+        return LLMResponse(
+            content=content,
+            model="gpt-5",
+            provider="openai",
+            usage=result.get("usage")  # GPT-5 returns usage under 'usage'
+        )
+
+    def _chat_standard(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
+        """Send request to standard OpenAI API (GPT-4, GPT-4o, etc.)."""
         url = f"{self.base_url}/chat/completions"
 
         headers = {
