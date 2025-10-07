@@ -17,7 +17,7 @@ openai:
 claude:
   api_key: ${ANTHROPIC_API_KEY}  # or set directly
   base_url: https://api.anthropic.com
-  model: claude-sonnet-4-5-20250929  # Options: claude-opus-4-20250514, claude-sonnet-4-5-20250929
+  model: claude-sonnet-4-5-20250929  # Options: claude-opus-4-1-20250805, claude-sonnet-4-5-20250929
   temperature: 0.1
   max_tokens: 64000
   timeout: 1000
