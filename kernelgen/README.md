@@ -58,6 +58,11 @@ python bench_kernel.py --model <model_name>
 ```bash
 # Benchmark square matrix multiplication
 python bench_kernel.py --model 1_Square_matrix_multiplication_
+
+python main.py --levels level1
+
+python main.py --levels level1 --continue-from logs/benchmark_results_20251007_042506.json --skip-generation 
+
 ```
 
 ### What the Benchmark Does

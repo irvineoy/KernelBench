@@ -80,7 +80,8 @@ act:
 	$(ACTIVATE_VENV_CMD) 
 
 
-vllm-server:
+# Run vLLM server with latest ROCm 6.4.1 and vLLM 0.10.1
+vllm:
 	@if ss -ltn | grep ':30001 ' > /dev/null; then \
 		echo "vLLM server is already running on port 30001."; \
 	else \
@@ -95,7 +96,7 @@ vllm-server:
 			--device=/dev/mem \
 			--group-add=render \
 			--security-opt=seccomp=unconfined \
-			rocm/vllm-dev:v0.9.0-rocm6.4 \
+			rocm/vllm:rocm6.4.1_vllm_0.10.1_20250909 \
 			vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
 			--served-model-name llamas_team_local_llm \
 			--api-key dummy \

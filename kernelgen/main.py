@@ -27,6 +27,7 @@ from contextlib import redirect_stdout, redirect_stderr
 from generation_prompt import generate_kernel_prompt, extract_hip_kernel, save_hip_kernel
 from llm_service import LLMService
 from bench_kernel import bench_kernel
+from bench_kernel_isolated import bench_kernel_isolated
 
 
 # Level multipliers for scoring
@@ -168,7 +169,7 @@ def discover_models(levels: List[str] = None) -> Dict[str, List[Path]]:
 
 def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: logging.Logger,
                      expected_count: threading.Event, stop_event: threading.Event,
-                     results_file: Path = None):
+                     results_file: Path = None, use_isolated: bool = False):
     """
     Worker thread that continuously benchmarks kernels from the queue.
     Starts working as soon as items are available, doesn't wait for all generation to complete.
@@ -184,11 +185,19 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
     benchmarked_count = 0
     expected_total = None
 
-    # Initialize results file
+    # Initialize results file (include existing results if any)
     if results_file:
         results_file.parent.mkdir(parents=True, exist_ok=True)
+        # Get initial results (pre-loaded successful ones)
+        initial_results = {k: v for k, v in results_dict.items() if not k.startswith('_')}
         with open(results_file, 'w') as f:
-            json.dump({"results": {}, "metadata": {"status": "in_progress"}}, f, indent=2)
+            json.dump({
+                "results": initial_results,
+                "metadata": {
+                    "status": "in_progress",
+                    "previous_results_count": len(initial_results)
+                }
+            }, f, indent=2)
 
     while True:
         try:
@@ -217,24 +226,29 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
             logger.info(f"\n{progress} Benchmarking {level}/{model_name}...")
 
             try:
-                # Capture stdout/stderr from bench_kernel (which uses print())
-                stdout_capture = StringIO()
-                stderr_capture = StringIO()
+                if use_isolated:
+                    # Use isolated subprocess benchmarking
+                    score = bench_kernel_isolated(model_name, timeout=120, verbose=True)
+                else:
+                    # Use regular in-process benchmarking
+                    # Capture stdout/stderr from bench_kernel (which uses print())
+                    stdout_capture = StringIO()
+                    stderr_capture = StringIO()
 
-                with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                    score = bench_kernel(model_name)
+                    with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
+                        score = bench_kernel(model_name)
 
-                # Log captured output
-                stdout_text = stdout_capture.getvalue()
-                stderr_text = stderr_capture.getvalue()
+                    # Log captured output
+                    stdout_text = stdout_capture.getvalue()
+                    stderr_text = stderr_capture.getvalue()
 
-                if stdout_text:
-                    for line in stdout_text.strip().split('\n'):
-                        logger.info(f"  {line}")
+                    if stdout_text:
+                        for line in stdout_text.strip().split('\n'):
+                            logger.info(f"  {line}")
 
-                if stderr_text:
-                    for line in stderr_text.strip().split('\n'):
-                        logger.error(f"  {line}")
+                    if stderr_text:
+                        for line in stderr_text.strip().split('\n'):
+                            logger.error(f"  {line}")
 
                 results_dict[model_name] = {
                     "level": level,
@@ -302,7 +316,9 @@ def pipeline_generate_and_benchmark(
     models: Dict[str, List[Path]],
     llm_service: LLMService,
     logger: logging.Logger,
-    max_workers: int = 8
+    max_workers: int = 8,
+    previous_results: Dict = None,
+    use_isolated: bool = False
 ) -> Dict[str, Dict[str, any]]:
     """
     Pipeline: Generate (parallel) -> Save (immediate) -> Benchmark (queue, sequential).
@@ -322,7 +338,7 @@ def pipeline_generate_and_benchmark(
 
     # Create benchmark queue and results dict
     benchmark_queue = queue.Queue()
-    benchmark_results = {}
+    benchmark_results = previous_results.copy() if previous_results else {}
     expected_count_event = threading.Event()
     stop_event = threading.Event()
 
@@ -363,7 +379,7 @@ def pipeline_generate_and_benchmark(
     # NOT daemon - we want it to complete even if main thread is done
     benchmark_thread = threading.Thread(
         target=benchmark_worker,
-        args=(benchmark_queue, benchmark_results, logger, expected_count_event, stop_event, results_file),
+        args=(benchmark_queue, benchmark_results, logger, expected_count_event, stop_event, results_file, use_isolated),
         daemon=False
     )
     benchmark_thread.start()
@@ -516,6 +532,16 @@ def main():
         default="llm_config.yaml",
         help="Path to LLM config file (default: llm_config.yaml)"
     )
+    parser.add_argument(
+        "--continue-from",
+        type=str,
+        help="Path to previous benchmark JSON file to continue from (skip successful models)"
+    )
+    parser.add_argument(
+        "--isolated",
+        action="store_true",
+        help="Run benchmarks in isolated subprocesses to prevent crashes from killing the main process"
+    )
 
     args = parser.parse_args()
 
@@ -527,19 +553,50 @@ def main():
         logger.info(f"Log file: {log_file}")
         logger.info("="*80)
 
+        # Load previous results if continuing and filter out existing models
+        previous_results_data = {}
+        existing_models = set()
+        if args.continue_from:
+            if not Path(args.continue_from).exists():
+                logger.error(f"Previous results file not found: {args.continue_from}")
+                return 1
+
+            logger.info(f"\nLoading previous results from: {args.continue_from}")
+            with open(args.continue_from, 'r') as f:
+                prev_data = json.load(f)
+                previous_results_data = prev_data.get('results', prev_data)  # Handle both formats
+                existing_models = set(previous_results_data.keys())
+
+            logger.info(f"Loaded {len(previous_results_data)} previous results (will skip these models)")
+
         # Discover models
         models = discover_models(args.levels)
         if not models:
             logger.error("No models found!")
             return 1
 
+        # Filter out models that already exist in previous results
+        if existing_models:
+            original_count = sum(len(files) for files in models.values())
+            for level in models:
+                models[level] = [f for f in models[level] if f.stem not in existing_models]
+            filtered_count = sum(len(files) for files in models.values())
+            logger.info(f"Skipping {original_count - filtered_count} models that already have results")
+
         total_models = sum(len(files) for files in models.values())
+        if total_models == 0:
+            logger.info("\nAll models already have results! Nothing to do.")
+            logger.info(f"Results are in: {args.continue_from}")
+            return 0
+
         logger.info(f"\nTotal models to process: {total_models}")
 
         # Use pipeline mode (generate -> save -> benchmark queue)
         if not args.skip_generation and not args.skip_benchmark:
             llm_service = LLMService(args.config)
-            benchmark_results = pipeline_generate_and_benchmark(models, llm_service, logger, args.workers)
+            benchmark_results = pipeline_generate_and_benchmark(
+                models, llm_service, logger, args.workers, previous_results_data, args.isolated
+            )
 
             # Print results table
             print_results_table(benchmark_results, logger)
@@ -574,7 +631,8 @@ def main():
         # Legacy: Benchmark only
         elif args.skip_generation and not args.skip_benchmark:
             logger.warning("Note: Benchmarking existing kernels only")
-            benchmark_results = {}
+            # Start with previous results if continuing
+            benchmark_results = previous_results_data.copy() if previous_results_data else {}
             total_models = sum(len(files) for files in models.values())
             completed = 0
 
@@ -584,7 +642,10 @@ def main():
                     completed += 1
                     logger.info(f"\n[{completed}/{total_models}] Benchmarking {level}/{model_name}...")
                     try:
-                        score = bench_kernel(model_name)
+                        if args.isolated:
+                            score = bench_kernel_isolated(model_name, timeout=120, verbose=True)
+                        else:
+                            score = bench_kernel(model_name)
                         benchmark_results[model_name] = {
                             "level": level,
                             "score": score,
