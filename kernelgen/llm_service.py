@@ -261,17 +261,31 @@ class ClaudeProvider(BaseProvider):
             else:
                 user_messages.append(msg)
 
+        # Check if thinking is enabled first to determine temperature
+        thinking = kwargs.get("thinking", self.config.get("thinking", "enabled"))
+
+        # Temperature must be 1 when thinking is enabled
+        if thinking == "enabled":
+            temperature = 1
+        else:
+            temperature = kwargs.get("temperature", self.config.get("temperature", 0.7))
+
         data = {
             "model": kwargs.get("model", self.model),
             "messages": user_messages,
             "max_tokens": kwargs.get("max_tokens", self.config.get("max_tokens", 4096)),
-            "temperature": kwargs.get("temperature", self.config.get("temperature", 0.7)),
+            "temperature": temperature,
         }
 
         # Add thinking parameter if configured
-        thinking = kwargs.get("thinking", self.config.get("thinking", "enabled"))
         if thinking in ["enabled", "disabled"]:
-            data["thinking"] = thinking
+            if thinking == "enabled":
+                # When enabled, budget_tokens is required (minimum 1024)
+                # Default to 10000 tokens for thinking budget
+                budget_tokens = kwargs.get("thinking_budget", self.config.get("thinking_budget", 10000))
+                data["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
+            else:
+                data["thinking"] = {"type": "disabled"}
 
         if system_content:
             data["system"] = system_content
