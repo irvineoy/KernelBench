@@ -21,6 +21,7 @@ claude:
   temperature: 0.1
   max_tokens: 64000
   timeout: 1000
+  thinking: enabled  # Enable thinking process output (enabled/disabled, default: disabled)
 
 # vLLM Local Model Configuration
 vllm:

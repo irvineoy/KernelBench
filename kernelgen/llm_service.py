@@ -268,6 +268,11 @@ class ClaudeProvider(BaseProvider):
             "temperature": kwargs.get("temperature", self.config.get("temperature", 0.7)),
         }
 
+        # Add thinking parameter if configured
+        thinking = kwargs.get("thinking", self.config.get("thinking", "enabled"))
+        if thinking in ["enabled", "disabled"]:
+            data["thinking"] = thinking
+
         if system_content:
             data["system"] = system_content
 
