@@ -298,10 +298,15 @@ class ClaudeProvider(BaseProvider):
             result = response.json()
 
         # Extract content from Claude response
-        content = ""
+        # When thinking is enabled, response contains multiple blocks (thinking + text)
+        # We need to extract only the text blocks, not thinking blocks
+        content_parts = []
         if "content" in result and isinstance(result["content"], list):
-            if result["content"] and "text" in result["content"][0]:
-                content = result["content"][0]["text"]
+            for block in result["content"]:
+                if block.get("type") == "text" and "text" in block:
+                    content_parts.append(block["text"])
+
+        content = "".join(content_parts) if content_parts else ""
 
         return LLMResponse(
             content=content,

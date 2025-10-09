@@ -21,8 +21,8 @@ claude:
   temperature: 0.1
   max_tokens: 64000
   timeout: 1000
-  thinking: enabled  # Enable thinking process output (enabled/disabled, default: disabled)
-  thinking_budget: 16000  # Budget tokens for thinking when enabled (minimum 1024)
+  thinking: disabled  # Enable thinking process output (enabled/disabled, default: disabled)
+  thinking_budget: 2000  # Budget tokens for thinking when enabled (minimum 1024)
 
 # vLLM Local Model Configuration
 vllm:

@@ -28,57 +28,12 @@ from generation_prompt import generate_kernel_prompt, extract_hip_kernel, save_h
 from llm_service import LLMService
 from bench_kernel import bench_kernel
 from bench_kernel_isolated import bench_kernel_isolated
+from utils import (
+    setup_logging, save_results, print_summary, calculate_total_score,
+    load_existing_results, LEVEL_MULTIPLIERS
+)
 
 
-# Level multipliers for scoring
-LEVEL_MULTIPLIERS = {
-    "level1": 1,
-    "level2": 10,
-    "level3": 100,
-}
-
-
-def setup_logging() -> Tuple[logging.Logger, Path]:
-    """
-    Setup logging to both console and timestamped log file.
-
-    Returns:
-        tuple: (logger, log_file_path)
-    """
-    # Create logs directory
-    log_dir = Path(__file__).parent / "logs"
-    log_dir.mkdir(exist_ok=True)
-
-    # Create timestamped log file
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"kernelgen_{timestamp}.log"
-
-    # Setup logger
-    logger = logging.getLogger("kernelgen")
-    logger.setLevel(logging.INFO)
-
-    # Remove existing handlers
-    logger.handlers.clear()
-
-    # File handler
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.INFO)
-    file_formatter = logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    file_handler.setFormatter(file_formatter)
-
-    # Console handler
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.INFO)
-    console_formatter = logging.Formatter('%(message)s')
-    console_handler.setFormatter(console_formatter)
-
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-
-    return logger, log_file
 
 
 class KernelGenerator:
@@ -190,12 +145,14 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
         results_file.parent.mkdir(parents=True, exist_ok=True)
         # Get initial results (pre-loaded successful ones)
         initial_results = {k: v for k, v in results_dict.items() if not k.startswith('_')}
+        score_stats = calculate_total_score(initial_results)
         with open(results_file, 'w') as f:
             json.dump({
                 "results": initial_results,
                 "metadata": {
                     "status": "in_progress",
-                    "previous_results_count": len(initial_results)
+                    "previous_results_count": len(initial_results),
+                    "total_score": score_stats
                 }
             }, f, indent=2)
 
@@ -274,13 +231,15 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
                 try:
                     # Filter out metadata keys when saving
                     clean_results = {k: v for k, v in results_dict.items() if not k.startswith('_')}
+                    score_stats = calculate_total_score(clean_results)
                     with open(results_file, 'w') as f:
                         json.dump({
                             "results": clean_results,
                             "metadata": {
                                 "status": "in_progress",
                                 "completed": benchmarked_count,
-                                "total": expected_total or "unknown"
+                                "total": expected_total or "unknown",
+                                "total_score": score_stats
                             }
                         }, f, indent=2)
                 except Exception as e:
@@ -297,13 +256,15 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
     if results_file:
         try:
             clean_results = {k: v for k, v in results_dict.items() if not k.startswith('_')}
+            score_stats = calculate_total_score(clean_results)
             with open(results_file, 'w') as f:
                 json.dump({
                     "results": clean_results,
                     "metadata": {
                         "status": "completed",
                         "completed": benchmarked_count,
-                        "total": expected_total or benchmarked_count
+                        "total": expected_total or benchmarked_count,
+                        "total_score": score_stats
                     }
                 }, f, indent=2)
         except Exception as e:
