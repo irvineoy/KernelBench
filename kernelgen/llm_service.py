@@ -316,6 +316,112 @@ class ClaudeProvider(BaseProvider):
         )
 
 
+class OpenRouterProvider(BaseProvider):
+    """OpenRouter API provider (Alpha Responses API for reasoning models)."""
+
+    def __init__(self, config: dict):
+        super().__init__(config)
+        self.api_key = config.get("api_key")
+        self.base_url = config.get("base_url", "https://openrouter.ai")
+        self.model = config.get("model", "openai/o4-mini")
+
+        if not self.api_key:
+            raise ValueError("OpenRouter API key not configured")
+
+    def _chat_impl(self, messages: List[Dict[str, str]], **kwargs) -> LLMResponse:
+        """Send request to OpenRouter Alpha Responses API."""
+        url = f"{self.base_url}/api/alpha/responses"
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json"
+        }
+
+        # Convert messages to OpenRouter format
+        # OpenRouter uses 'input' format with type-based message structure
+        input_messages = []
+
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+
+            # Skip system messages for now (can be added as part of first user message)
+            if role == "system":
+                continue
+
+            # Create message in OpenRouter format
+            message = {
+                "type": "message",
+                "role": role,
+                "content": [
+                    {
+                        "type": "input_text" if role == "user" else "output_text",
+                        "text": content
+                    }
+                ]
+            }
+
+            # For assistant messages, add required fields
+            if role == "assistant":
+                message["id"] = f"msg_{hash(content) % 1000000}"
+                message["status"] = "completed"
+                message["content"][0]["annotations"] = []
+
+            input_messages.append(message)
+
+        # Build request data
+        data = {
+            "model": kwargs.get("model", self.model),
+            "input": input_messages if len(input_messages) > 1 else input_messages[0]["content"][0]["text"] if input_messages else "",
+            "max_output_tokens": kwargs.get("max_output_tokens", self.config.get("max_output_tokens", 9000)),
+        }
+
+        # Add reasoning configuration if specified
+        effort = kwargs.get("effort", self.config.get("effort"))
+        if effort:
+            data["reasoning"] = {"effort": effort}
+
+        # Add temperature if specified (not used with reasoning models typically)
+        temperature = kwargs.get("temperature", self.config.get("temperature"))
+        if temperature is not None:
+            data["temperature"] = temperature
+
+        timeout = httpx.Timeout(self.timeout)
+
+        with httpx.Client(timeout=timeout) as client:
+            response = client.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            result = response.json()
+
+        # Extract content from OpenRouter response
+        content = ""
+
+        # Handle output array format
+        if "output" in result and isinstance(result["output"], list):
+            for item in result["output"]:
+                if item.get("type") == "message":
+                    for content_item in item.get("content", []):
+                        if content_item.get("type") == "output_text":
+                            content += content_item.get("text", "")
+
+        # Fallback for simpler response formats
+        if not content and "output" in result:
+            if isinstance(result["output"], str):
+                content = result["output"]
+            elif isinstance(result["output"], dict):
+                content = result["output"].get("text", "") or result["output"].get("content", "")
+
+        if not content:
+            raise RuntimeError("OpenRouter response did not include any output text")
+
+        return LLMResponse(
+            content=content,
+            model=result.get("model", self.model),
+            provider="openrouter",
+            usage=result.get("usage")
+        )
+
+
 class VLLMProvider(BaseProvider):
     """vLLM local model provider (OpenAI-compatible API)."""
 
@@ -365,6 +471,7 @@ class LLMService:
     PROVIDERS = {
         "openai": OpenAIProvider,
         "claude": ClaudeProvider,
+        "openrouter": OpenRouterProvider,
         "vllm": VLLMProvider,
     }
 
@@ -453,3 +560,11 @@ if __name__ == "__main__":
     # openai_service = LLMService("llm_config.yaml", provider="openai")
     # response = openai_service.simple_chat("Hello!")
     # print(f"\nOpenAI: {response}")
+
+    # Use openrouter provider with reasoning
+    # openrouter_service = LLMService("llm_config.yaml", provider="openrouter")
+    # response = openrouter_service.simple_chat(
+    #     "Was 1995 30 years ago? Please show your reasoning.",
+    #     effort="high"  # Enable high-effort reasoning
+    # )
+    # print(f"\nOpenRouter: {response}")

@@ -183,9 +183,12 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
             logger.info(f"\n{progress} Benchmarking {level}/{model_name}...")
 
             try:
+                # Format model name as "level/model_name" for proper path resolution
+                full_model_name = f"{level}/{model_name}"
+
                 if use_isolated:
                     # Use isolated subprocess benchmarking
-                    score = bench_kernel_isolated(model_name, timeout=120, logger=logger)
+                    score = bench_kernel_isolated(full_model_name, timeout=120, logger=logger)
                 else:
                     # Use regular in-process benchmarking
                     # Capture stdout/stderr from bench_kernel (which uses print())
@@ -193,7 +196,7 @@ def benchmark_worker(benchmark_queue: queue.Queue, results_dict: dict, logger: l
                     stderr_capture = StringIO()
 
                     with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                        score = bench_kernel(model_name)
+                        score = bench_kernel(full_model_name)
 
                     # Log captured output
                     stdout_text = stdout_capture.getvalue()
@@ -607,10 +610,13 @@ def main():
                     completed += 1
                     logger.info(f"\n[{completed}/{total_models}] Benchmarking {level}/{model_name}...")
                     try:
+                        # Format model name as "level/model_name" for proper path resolution
+                        full_model_name = f"{level}/{model_name}"
+
                         if args.isolated:
-                            score = bench_kernel_isolated(model_name, timeout=120, logger=logger)
+                            score = bench_kernel_isolated(full_model_name, timeout=120, logger=logger)
                         else:
-                            score = bench_kernel(model_name)
+                            score = bench_kernel(full_model_name)
                         benchmark_results[model_name] = {
                             "level": level,
                             "score": score,

@@ -95,6 +95,10 @@ def benchmark(func, *args, warmup=5, iterations=20):
 def bench_kernel(model_name: str):
     """Test HIP kernel against PyTorch implementation.
 
+    Args:
+        model_name: Model name in format "level/name" (e.g., "level1/1_Square_matrix_multiplication_")
+                    or just "name" (defaults to level1 for backward compatibility)
+
     Returns:
         int: Score based on compilation, correctness, and performance
             - Compilation success: 20 points
@@ -103,13 +107,21 @@ def bench_kernel(model_name: str):
     """
     score = 0
 
+    # Parse level from model_name if provided
+    if "/" in model_name:
+        level, model_base_name = model_name.split("/", 1)
+    else:
+        # Backward compatibility: default to level1
+        level = "level1"
+        model_base_name = model_name
+
     # Setup paths
     project_root = Path(__file__).parent.parent
-    model_path = project_root / "KernelBench" / "level1" / f"{model_name}.py"
-    kernel_dir = project_root / "kernelgen" / "level1"
+    model_path = project_root / "KernelBench" / level / f"{model_base_name}.py"
+    kernel_dir = project_root / "kernelgen" / level
 
     print("=" * 80)
-    print(f"Testing: {model_name}")
+    print(f"Testing: {level}/{model_base_name}")
     print("=" * 80)
 
     # Load Python model
@@ -141,7 +153,7 @@ def bench_kernel(model_name: str):
     # Load HIP kernel
     print(f"Compiling HIP kernel...")
     try:
-        hip_kernel = load_hip_kernel(kernel_dir, model_name)
+        hip_kernel = load_hip_kernel(kernel_dir, model_base_name)
         if not hasattr(hip_kernel, HIP_ENTRYPOINT):
             available = ", ".join(dir(hip_kernel))
             raise AttributeError(

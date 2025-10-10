@@ -8,12 +8,40 @@ import argparse
 import json
 import logging
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Optional
+
+
+def clean_build_cache(model_name: str) -> None:
+    """
+    Delete the build_cache folder for the given model before benchmarking.
+
+    Args:
+        model_name: Model name in format "level/name" (e.g., "level1/1_Square_matrix_multiplication_")
+                    or just "name" (defaults to level1 for backward compatibility)
+    """
+    # Parse level from model_name if provided
+    if "/" in model_name:
+        level, _ = model_name.split("/", 1)
+    else:
+        # Backward compatibility: default to level1
+        level = "level1"
+
+    # Determine kernel directory based on level
+    kernel_dir = Path(__file__).parent / level
+    build_cache_dir = kernel_dir / "build_cache"
+
+    if build_cache_dir.exists():
+        try:
+            shutil.rmtree(build_cache_dir)
+        except Exception:
+            # Ignore errors if deletion fails
+            pass
 
 
 def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
@@ -27,6 +55,9 @@ def run_benchmark_subprocess(model_name: str, timeout: int = 120) -> dict:
     Returns:
         dict: {score, status, error, stdout, stderr, exit_code}
     """
+    # Clean build cache before running benchmark
+    clean_build_cache(model_name)
+
     cmd = [
         sys.executable,
         "bench_kernel.py",
@@ -170,7 +201,9 @@ def bench_kernel_isolated(
         debug_dir = Path("logs/debug")
         debug_dir.mkdir(parents=True, exist_ok=True)
 
-        debug_file = debug_dir / f"debug_{model_name}_{int(time.time())}.json"
+        # Replace '/' with '_' in model_name for valid filename
+        safe_model_name = model_name.replace('/', '_')
+        debug_file = debug_dir / f"debug_{safe_model_name}_{int(time.time())}.json"
         with open(debug_file, 'w') as f:
             json.dump(result, f, indent=2)
         log_info(f"    Debug info saved to: {debug_file}")
