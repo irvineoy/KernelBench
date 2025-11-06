@@ -1,0 +1,1 @@
+# This script will setup environment tools and dependencies. It will also provide duplicated workspace for the agent 

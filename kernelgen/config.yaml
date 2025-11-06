@@ -1,7 +1,36 @@
-# LLM Service Configuration
-# Supports: OpenAI GPT-4o/GPT-4, Claude Opus 4/Sonnet 4.5, OpenRouter, and vLLM local models
+# ============================================================================
+# Agent & Task Configuration
+# ============================================================================
 
-# Provider selection: openai, claude, openrouter, or vllm
+# Agent Template Selection
+# Choose ONE agent template that defines how the LLM interacts with the system
+agent:
+  # Available options:
+  # - cursor
+  # - geak
+  # - single_llm_call
+  # - SWE-agent
+  # - claude_code
+  template: cursor
+  max_iterations: 5
+
+
+# Task Selection
+# Choose ONE or MORE tasks to execute (can be combined)
+tasks:
+  # Available task types:
+  # - all: Run all available task types
+  # - aiter: Async iteration kernels (for streaming/async workloads)
+  # - triton: Generate Triton kernels (NVIDIA GPUs, Python-based)
+  # - vllm: Optimize kernels for vLLM inference serving
+  # - customer_hip: Custom HIP kernels for AMD GPUs (ROCm)
+  # - customer_pytorch: Custom PyTorch implementations
+  enabled:
+    - customer_hip           # Primary: AMD GPU HIP kernels
+  
+target_arch: gfx942
+
+# API and Model configuration: openai, claude, openrouter, or vllm
 provider: claude
 
 # OpenAI Configuration (GPT-5)
@@ -43,8 +72,3 @@ vllm:
   max_tokens: 128_000
   timeout: 300
 
-# Retry configuration (applies to all providers)
-retry:
-  max_retries: 3
-  retry_delay: 2  # seconds
-  exponential_backoff: true
